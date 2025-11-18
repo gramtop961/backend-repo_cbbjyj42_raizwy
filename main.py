@@ -9,7 +9,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-import requests
+from bson import ObjectId
 
 from database import db, create_document, get_documents
 from schemas import User, Session, Credit, GeneratedImage, Order, BlogPost, ApiLog, Admin, PricingPlan, Setting
@@ -67,16 +67,22 @@ def decode_token(token: str) -> dict:
     return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
 
 
+def oid(id_str: Any) -> Any:
+    try:
+        return ObjectId(id_str)
+    except Exception:
+        return id_str
+
+
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     try:
         payload = decode_token(creds.credentials)
         user_id = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
-        user = db["user"].find_one({"_id": db.client.get_default_database().codec_options.document_class.objectid_class(user_id)})
-        if not user:
-            # fallback to string id
-            user = db["user"].find_one({"_id": user_id})
+        if db is None:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        user = db["user"].find_one({"_id": oid(user_id)}) or db["user"].find_one({"_id": user_id})
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         return user
@@ -103,6 +109,8 @@ class RefreshRequest(BaseModel):
 # Auth Routes
 @app.post("/auth/register", response_model=TokenPair)
 def register(req: RegisterRequest):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     existing = db["user"].find_one({"email": req.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -121,6 +129,8 @@ def register(req: RegisterRequest):
 
 @app.post("/auth/login", response_model=TokenPair)
 def login(req: LoginRequest):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     user = db["user"].find_one({"email": req.email})
     if not user or not user.get("password_hash"):
         raise HTTPException(status_code=400, detail="Invalid email or password")
@@ -139,6 +149,8 @@ def login(req: LoginRequest):
 
 @app.post("/auth/refresh", response_model=TokenPair)
 def refresh_token(req: RefreshRequest):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     try:
         payload = decode_token(req.refresh_token)
         if payload.get("type") != "refresh":
@@ -166,6 +178,8 @@ class PurchaseRequest(BaseModel):
 
 @app.post("/credits/purchase")
 def purchase_credits(req: PurchaseRequest, user=Depends(get_current_user)):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     user_id = str(user["_id"]) if "_id" in user else user.get("id")
     order = Order(user_id=user_id, provider=req.provider, type="one_time", status="paid", amount=req.amount_cents, currency=req.currency, credits=req.credits)
     order_id = create_document("order", order)
@@ -180,12 +194,14 @@ def purchase_credits(req: PurchaseRequest, user=Depends(get_current_user)):
 class GenerateRequest(BaseModel):
     prompt: Optional[str] = None
     style: Optional[str] = None
-    mode: Literal = "text_to_image"  # text_to_image | image_to_image | bg_remove | bg_replace | upscale | variation
+    mode: str = "text_to_image"  # text_to_image | image_to_image | bg_remove | bg_replace | upscale | variation
     source_image_url: Optional[str] = None
     hd: bool = False
 
 
 def consume_credits(user_doc: dict, cost: int):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     balance = user_doc.get("credits", 0)
     if balance < cost:
         raise HTTPException(status_code=402, detail="Insufficient credits")
@@ -197,6 +213,8 @@ def consume_credits(user_doc: dict, cost: int):
 
 @app.post("/ai/generate")
 def ai_generate(req: GenerateRequest, user=Depends(get_current_user)):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     # Simple cost model: base 1 credit, HD +2
     cost = 1 + (2 if req.hd else 0)
     consume_credits(user, cost)
@@ -216,13 +234,19 @@ def ai_generate(req: GenerateRequest, user=Depends(get_current_user)):
     # Simulate processing
     time.sleep(0.2)
     output_url = f"https://picsum.photos/seed/{gen_id}/1024/1024"
-    db["generatedimage"].update_one({"_id": db["generatedimage"].find_one({'_id': gen_id}) or gen_id}, {"$set": {"status": "completed", "output_url": output_url}})
+    # Update by ObjectId if possible
+    try:
+        db["generatedimage"].update_one({"_id": oid(gen_id)}, {"$set": {"status": "completed", "output_url": output_url}})
+    except Exception:
+        db["generatedimage"].update_one({"_id": gen_id}, {"$set": {"status": "completed", "output_url": output_url}})
 
     return {"id": gen_id, "output_url": output_url}
 
 
 @app.get("/ai/history")
 def ai_history(limit: int = 20, user=Depends(get_current_user)):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     items = list(db["generatedimage"].find({"user_id": str(user["_id"]) }).sort("created_at", -1).limit(limit))
     for doc in items:
         doc["id"] = str(doc.get("_id"))
@@ -232,7 +256,9 @@ def ai_history(limit: int = 20, user=Depends(get_current_user)):
 
 @app.post("/images/{image_id}/favorite")
 def toggle_favorite(image_id: str, user=Depends(get_current_user)):
-    img = db["generatedimage"].find_one({"_id": image_id}) or db["generatedimage"].find_one({"_id": image_id})
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
+    img = db["generatedimage"].find_one({"_id": oid(image_id)}) or db["generatedimage"].find_one({"_id": image_id})
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
     new_val = not img.get("is_favorite", False)
@@ -252,6 +278,8 @@ class BlogCreate(BaseModel):
 
 @app.post("/blog")
 def create_blog(post: BlogCreate, user=Depends(get_current_user)):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     # require admin
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -262,6 +290,8 @@ def create_blog(post: BlogCreate, user=Depends(get_current_user)):
 
 @app.get("/blog")
 def list_blogs(published_only: bool = True):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     query = {"published": True} if published_only else {}
     items = list(db["blogpost"].find(query).sort("created_at", -1))
     for doc in items:
@@ -272,6 +302,8 @@ def list_blogs(published_only: bool = True):
 
 @app.get("/blog/{slug}")
 def get_blog(slug: str):
+    if db is None:
+        raise HTTPException(status_code=500, detail="Database not configured")
     post = db["blogpost"].find_one({"slug": slug, "published": True})
     if not post:
         raise HTTPException(status_code=404, detail="Not found")
@@ -288,10 +320,9 @@ def root():
 
 @app.get("/test")
 def test_database():
-    from database import db as _db
     try:
-        cols = _db.list_collection_names()
-        return {"ok": True, "collections": cols[:20]}
+        cols = db.list_collection_names() if db is not None else []
+        return {"ok": True, "collections": cols[:20], "db_configured": db is not None}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
