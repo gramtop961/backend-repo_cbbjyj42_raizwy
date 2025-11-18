@@ -1,48 +1,122 @@
 """
-Database Schemas
+Database Schemas for Petify AI
 
-Define your MongoDB collection schemas here using Pydantic models.
-These schemas are used for data validation in your application.
+Each Pydantic model corresponds to a MongoDB collection. The collection name is the
+lowercased class name.
 
-Each Pydantic model represents a collection in your database.
-Model name is converted to lowercase for the collection name:
-- User -> "user" collection
-- Product -> "product" collection
-- BlogPost -> "blogs" collection
+Collections:
+- user
+- session
+- credit
+- generatedimage
+- order
+- blogpost
+- apilog
+- admin
+- pricingplan
+- setting
+- favorite
 """
+from typing import Optional, List, Literal, Dict, Any
+from pydantic import BaseModel, Field, EmailStr
+from datetime import datetime
 
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# Example schemas (replace with your own):
-
+# Auth / Users
 class User(BaseModel):
-    """
-    Users collection schema
-    Collection name: "user" (lowercase of class name)
-    """
-    name: str = Field(..., description="Full name")
-    email: str = Field(..., description="Email address")
-    address: str = Field(..., description="Address")
-    age: Optional[int] = Field(None, ge=0, le=120, description="Age in years")
-    is_active: bool = Field(True, description="Whether user is active")
+    email: EmailStr
+    password_hash: Optional[str] = Field(None, description="BCrypt hash, only for email/password accounts")
+    name: Optional[str] = None
+    image: Optional[str] = None
+    provider: Literal["credentials", "google", "admin"] = "credentials"
+    provider_id: Optional[str] = None
+    role: Literal["user", "admin"] = "user"
+    credits: int = 0
+    is_active: bool = True
+    last_login_at: Optional[datetime] = None
 
-class Product(BaseModel):
-    """
-    Products collection schema
-    Collection name: "product" (lowercase of class name)
-    """
-    title: str = Field(..., description="Product title")
-    description: Optional[str] = Field(None, description="Product description")
-    price: float = Field(..., ge=0, description="Price in dollars")
-    category: str = Field(..., description="Product category")
-    in_stock: bool = Field(True, description="Whether product is in stock")
+class Session(BaseModel):
+    user_id: str
+    refresh_token: str
+    expires_at: datetime
+    user_agent: Optional[str] = None
+    ip: Optional[str] = None
 
-# Add your own schemas here:
-# --------------------------------------------------
+# Credits and Orders
+class Credit(BaseModel):
+    user_id: str
+    delta: int
+    reason: Literal[
+        "purchase", "subscription", "generation", "background", "upscale", "variation", "admin_adjust"
+    ]
+    balance_after: Optional[int] = None
+    meta: Optional[Dict[str, Any]] = None
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class Order(BaseModel):
+    user_id: str
+    provider: Literal["stripe", "razorpay", "paypal"] = "stripe"
+    type: Literal["one_time", "subscription"] = "one_time"
+    status: Literal["created", "paid", "failed", "refunded", "canceled"] = "created"
+    amount: int = Field(..., description="Amount in smallest currency unit, e.g. cents")
+    currency: str = "usd"
+    credits: int = 0
+    external_id: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+
+# Content
+class GeneratedImage(BaseModel):
+    user_id: str
+    prompt: Optional[str] = None
+    source_image_url: Optional[str] = None
+    style: Optional[str] = None
+    variant_of_id: Optional[str] = None
+    hd: bool = False
+    bg: Optional[str] = Field(None, description="background mode: remove|replace:<color/url>")
+    output_url: Optional[str] = None
+    output_urls: Optional[List[str]] = None
+    status: Literal["queued", "processing", "completed", "failed"] = "queued"
+    provider: Optional[str] = None
+    provider_job_id: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+    is_public: bool = False
+    is_favorite: bool = False
+
+class Favorite(BaseModel):
+    user_id: str
+    image_id: str
+
+class BlogPost(BaseModel):
+    slug: str
+    title: str
+    excerpt: Optional[str] = None
+    content_md: str
+    cover_image_url: Optional[str] = None
+    published: bool = False
+    tags: Optional[List[str]] = None
+
+class ApiLog(BaseModel):
+    user_id: Optional[str] = None
+    route: str
+    status_code: int
+    method: str
+    latency_ms: int
+    meta: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+class Admin(BaseModel):
+    user_id: str
+    permissions: List[str] = []
+
+class PricingPlan(BaseModel):
+    key: str
+    name: str
+    description: Optional[str] = None
+    price_cents: int
+    currency: str = "usd"
+    credits: int
+    is_subscription: bool = False
+    interval: Optional[Literal["month", "year"]] = None
+    is_active: bool = True
+
+class Setting(BaseModel):
+    key: str
+    value: Dict[str, Any]
